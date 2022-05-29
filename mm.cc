@@ -1,6 +1,17 @@
-#include "ut0cpu_cache.h"
-
 #include <atomic>
+#include <cstddef>
+#include <iostream>
+#include <assert.h>
+#include <stddef.h>
+#include <atomic>
+#include <algorithm>
+#include <sys/types.h>
+#include <string.h>
+#include <thread>
+#include <unistd.h>
+#include <sys/time.h>
+
+
 
 constexpr size_t INNODB_CACHE_LINE_SIZE = 64;
 
@@ -13,11 +24,12 @@ class mpmc_bq {
   /** Constructor
   @param[in]	n_elems		Max number of elements allowed */
   explicit mpmc_bq(size_t n_elems)
-      : m_ring(reinterpret_cast<Cell *>(UT_NEW_ARRAY_NOKEY(Aligned, n_elems))),
+      : m_ring(new Cell[n_elems]),
         m_capacity(n_elems - 1) {
     /* Should be a power of 2 */
-    ut_a((n_elems >= 2) && ((n_elems & (n_elems - 1)) == 0));
+    // ut_a((n_elems >= 2) && ((n_elems & (n_elems - 1)) == 0));
 
+    printf("m_capacity %d\n", m_capacity);
     for (size_t i = 0; i < n_elems; ++i) {
       m_ring[i].m_pos.store(i, std::memory_order_relaxed);
     }
@@ -27,12 +39,12 @@ class mpmc_bq {
   }
 
   /** Destructor */
-  ~mpmc_bq() { UT_DELETE_ARRAY(m_ring); }
+  ~mpmc_bq() {delete m_ring;}
 
   /** Enqueue an element
   @param[in]	data		Element to insert, it will be copied
   @return true on success */
-  bool enqueue(T const &data) MY_ATTRIBUTE((warn_unused_result)) {
+  bool enqueue(T const &data) {
     /* m_enqueue_pos only wraps at MAX(m_enqueue_pos), instead
     we use the capacity to convert the sequence to an array
     index. This is why the ring buffer must be a size which
@@ -61,6 +73,8 @@ class mpmc_bq {
       // 如果diff !=0 说明要插入的已经被别人插入了, 顺势去插入下个位置了
       // 如果diff < 0 说明队列已经满了
       intptr_t diff = (intptr_t)seq - (intptr_t)pos;
+      printf("diff %d seq %d pos %d \n", diff, seq, pos);
+      printf("m_enqueue_pos %d\n", m_enqueue_pos.load());
 
       /* If they are the same then it means this cell is empty */
 
@@ -93,13 +107,14 @@ class mpmc_bq {
 
     cell->m_pos.store(pos + 1, std::memory_order_release);
 
+    printf("m_enqueue_pos %d\n", m_enqueue_pos.load());
     return (true);
   }
 
   /** Dequeue an element
   @param[out]	data		Element read from the queue
   @return true on success */
-  bool dequeue(T &data) MY_ATTRIBUTE((warn_unused_result)) {
+  bool dequeue(T &data) {
     Cell *cell;
     size_t pos = m_dequeue_pos.load(std::memory_order_relaxed);
 
@@ -143,12 +158,12 @@ class mpmc_bq {
   }
 
   /** @return the capacity of the queue */
-  size_t capacity() const MY_ATTRIBUTE((warn_unused_result)) {
+  size_t capacity() const {
     return (m_capacity + 1);
   }
 
   /** @return true if the queue is empty. */
-  bool empty() const MY_ATTRIBUTE((warn_unused_result)) {
+  bool empty() const {
     size_t pos = m_dequeue_pos.load(std::memory_order_relaxed);
 
     for (;;) {
@@ -171,16 +186,13 @@ class mpmc_bq {
   }
 
  private:
-  using Pad = byte[ut::INNODB_CACHE_LINE_SIZE];
+  using Pad = char[INNODB_CACHE_LINE_SIZE];
 
   struct Cell {
     std::atomic<size_t> m_pos;
     T m_data;
   };
 
-  using Aligned =
-      typename std::aligned_storage<sizeof(Cell),
-                                    std::alignment_of<Cell>::value>::type;
 
   Pad m_pad0;
   Cell *const m_ring;
@@ -197,4 +209,59 @@ class mpmc_bq {
   mpmc_bq &operator=(const mpmc_bq &) = delete;
 };
 
-#endif /* ut0mpmcbq_h */
+
+int queue_size = 100000;
+
+mpmc_bq <int> q(10000000);
+
+int thread_num = 0;
+int element_num = 100000;
+
+uint64_t NowMicros() {
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return static_cast<uint64_t>(tv.tv_sec) * 1000000 + tv.tv_usec;
+}
+
+void *func(void *arg) {
+  int id = *(int *)&arg;
+  for (int i = 0; i < element_num; i++) {
+    printf("i %d\n", i);
+    while (!q.enqueue(i)) {
+      std::this_thread::yield();
+    }
+  }
+  int data;
+  for (int i = 0; i < element_num; i++) {
+    printf("i %d\n", i);
+    while (!q.dequeue(data)) {
+      std::this_thread::yield();
+    }
+  }
+}
+
+void test_mcmq_mutilthreads() {
+  thread_num = 1;
+  pthread_t tid[thread_num];
+
+  uint64_t st, ed;
+  st = NowMicros();
+  for (int i = 0; i < thread_num; i++) {
+    pthread_create(&tid[i], NULL, func, (void *)i);
+  }
+  for (int i = 0; i < thread_num; i++) {
+    pthread_join(tid[i], NULL);
+  }
+
+  ed = NowMicros();
+
+  printf("insert %lld elements, time cost %lld us\n", (uint64_t)thread_num * (uint64_t)element_num, ed - st);
+
+}
+
+
+int main()
+{
+  test_mcmq_mutilthreads();
+  return 0;
+}
