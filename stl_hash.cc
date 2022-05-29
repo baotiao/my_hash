@@ -21,7 +21,7 @@ std::map<int, int> m_hash;
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
 int thread_num = 0;
-int element_num = 100000;
+int element_num = 10000;
 
 
 void *func(void *arg) {

@@ -1,266 +1,275 @@
-/*  Multi-producer/multi-consumer bounded queue.
- *  Copyright (c) 2010-2011, Dmitry Vyukov. All rights reserved.
- *  Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
- *     1. Redistributions of source code must retain the above copyright notice, this list of
- *        conditions and the following disclaimer.
- *     2. Redistributions in binary form must reproduce the above copyright notice, this list
- *        of conditions and the following disclaimer in the documentation and/or other materials
- *        provided with the distribution.
- *  THIS SOFTWARE IS PROVIDED BY DMITRY VYUKOV "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
- *  THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL
- *  DMITRY VYUKOV OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- *  (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- *  HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- *  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *  The views and conclusions contained in the software and documentation are those of the authors and should not be interpreted
- *  as representing official policies, either expressed or implied, of Dmitry Vyukov.
- */ 
-
-
-#include <stdio.h>
-#include <time.h>
-#include <stdint.h>
-#include <process.h>
+#include <atomic>
+#include <cstddef>
 #include <iostream>
-#include <string>
+#include <assert.h>
+#include <stddef.h>
+#include <atomic>
+#include <algorithm>
+#include <sys/types.h>
+#include <string.h>
+#include <thread>
+#include <unistd.h>
+#include <sys/time.h>
 
 
-enum memory_order
-{
-    memory_order_relaxed,
-    memory_order_consume,
-    memory_order_acquire,
-    memory_order_release,
-    memory_order_acq_rel,
-    memory_order_seq_cst,
+
+constexpr size_t INNODB_CACHE_LINE_SIZE = 64;
+
+/** Multiple producer consumer, bounded queue
+ Implementation of Dmitry Vyukov's MPMC algorithm
+ http://www.1024cores.net/home/lock-free-algorithms/queues/bounded-mpmc-queue */
+template <typename T>
+class mpmc_bq {
+ public:
+  /** Constructor
+  @param[in]	n_elems		Max number of elements allowed */
+  explicit mpmc_bq(size_t n_elems)
+      : m_ring(new Cell[n_elems]),
+        m_capacity(n_elems - 1) {
+    /* Should be a power of 2 */
+    // ut_a((n_elems >= 2) && ((n_elems & (n_elems - 1)) == 0));
+
+    printf("m_capacity %d\n", m_capacity);
+    for (size_t i = 0; i < n_elems; ++i) {
+      m_ring[i].m_pos.store(i, std::memory_order_relaxed);
+    }
+
+    m_enqueue_pos.store(0, std::memory_order_relaxed);
+    m_dequeue_pos.store(0, std::memory_order_relaxed);
+  }
+
+  /** Destructor */
+  ~mpmc_bq() {delete m_ring;}
+
+  /** Enqueue an element
+  @param[in]	data		Element to insert, it will be copied
+  @return true on success */
+  bool enqueue(T const &data) {
+    /* m_enqueue_pos only wraps at MAX(m_enqueue_pos), instead
+    we use the capacity to convert the sequence to an array
+    index. This is why the ring buffer must be a size which
+    is a power of 2. This also allows the sequence to double
+    as a ticket/lock. */
+
+    // pos 是enqueue 时刻, 想要插入的位置
+    size_t pos = m_enqueue_pos.load(std::memory_order_relaxed);
+
+    Cell *cell;
+
+    for (;;) {
+      // 比如初始化的时候m_enqueue_pos = 0
+      // cell 获得m_ring 循环数组 0 这个位置
+      cell = &m_ring[pos & m_capacity];
+
+      size_t seq;
+
+      // seq = 0, 当前cell 在m_ring 的位置
+      seq = cell->m_pos.load(std::memory_order_acquire);
+
+      // seq 是当前cell 的位置和pos 是否有变化
+      // 如果在获得pos 和 cell 之前已经有其他thread 已经插入数据了
+      // 那么这个时候sel = 1, 那么diff = 1
+      // 所以diff == 0 说明要插入的位置就是enqueue 时候要插入的位置
+      // 如果diff !=0 说明要插入的已经被别人插入了, 顺势去插入下个位置了
+      // 如果diff < 0 说明队列已经满了
+      intptr_t diff = (intptr_t)seq - (intptr_t)pos;
+      // printf("diff %d seq %d pos %d \n", diff, seq, pos);
+      // printf("m_enqueue_pos %d\n", m_enqueue_pos.load());
+
+      /* If they are the same then it means this cell is empty */
+
+      if (diff == 0) {
+        /* Claim our spot by moving head. If head isn't the same as we last
+        checked then that means someone beat us to the punch. Weak compare is
+        faster, but can return spurious results which in this instance is OK,
+        because it's in the loop */
+
+        // diff == 0, 说明这次插入可以成功插入
+        // 插入完成以后, 需要把调整下次要插入的位置, 也就是m_enqueue_pos + 1
+        if (m_enqueue_pos.compare_exchange_weak(pos, pos + 1,
+                                                std::memory_order_relaxed)) {
+          break;
+        }
+
+      } else if (diff < 0) {
+        /* The queue is full */
+
+        return (false);
+
+      } else {
+        pos = m_enqueue_pos.load(std::memory_order_relaxed);
+      }
+    }
+
+    cell->m_data = data;
+
+    /* Increment the sequence so that the tail knows it's accessible */
+
+    cell->m_pos.store(pos + 1, std::memory_order_release);
+
+    // printf("m_enqueue_pos %d\n", m_enqueue_pos.load());
+    return (true);
+  }
+
+  /** Dequeue an element
+  @param[out]	data		Element read from the queue
+  @return true on success */
+  bool dequeue(T &data) {
+    Cell *cell;
+    size_t pos = m_dequeue_pos.load(std::memory_order_relaxed);
+
+    // 这里dequeue 会保证按照顺序进行dequeue
+    for (;;) {
+      cell = &m_ring[pos & m_capacity];
+
+      size_t seq = cell->m_pos.load(std::memory_order_acquire);
+
+      auto diff = (intptr_t)seq - (intptr_t)(pos + 1);
+
+      if (diff == 0) {
+        /* Claim our spot by moving the head. If head isn't the same as we last
+        checked then that means someone beat us to the punch. Weak compare is
+        faster, but can return spurious results. Which in this instance is
+        OK, because it's in the loop. */
+
+        if (m_dequeue_pos.compare_exchange_weak(pos, pos + 1,
+                                                std::memory_order_relaxed)) {
+          break;
+        }
+
+      } else if (diff < 0) {
+        /* The queue is empty */
+        return (false);
+
+      } else {
+        /* Under normal circumstances this branch should never be taken. */
+        pos = m_dequeue_pos.load(std::memory_order_relaxed);
+      }
+    }
+
+    data = cell->m_data;
+
+    /* Set the sequence to what the head sequence should be next
+    time around */
+
+    cell->m_pos.store(pos + m_capacity + 1, std::memory_order_release);
+
+    return (true);
+  }
+
+  /** @return the capacity of the queue */
+  size_t capacity() const {
+    return (m_capacity + 1);
+  }
+
+  /** @return true if the queue is empty. */
+  bool empty() const {
+    size_t pos = m_dequeue_pos.load(std::memory_order_relaxed);
+
+    for (;;) {
+      auto cell = &m_ring[pos & m_capacity];
+
+      size_t seq = cell->m_pos.load(std::memory_order_acquire);
+
+      auto diff = (intptr_t)seq - (intptr_t)(pos + 1);
+
+      if (diff == 0) {
+        return (false);
+      } else if (diff < 0) {
+        return (true);
+      } else {
+        pos = m_dequeue_pos.load(std::memory_order_relaxed);
+      }
+    }
+
+    return (false);
+  }
+
+ private:
+  using Pad = char[INNODB_CACHE_LINE_SIZE];
+
+  struct Cell {
+    std::atomic<size_t> m_pos;
+    T m_data;
+  };
+
+
+  Pad m_pad0;
+  Cell *const m_ring;
+  size_t const m_capacity;
+  Pad m_pad1;
+  std::atomic<size_t> m_enqueue_pos;
+  Pad m_pad2;
+  std::atomic<size_t> m_dequeue_pos;
+  Pad m_pad3;
+
+  mpmc_bq(mpmc_bq &&) = delete;
+  mpmc_bq(const mpmc_bq &) = delete;
+  mpmc_bq &operator=(mpmc_bq &&) = delete;
+  mpmc_bq &operator=(const mpmc_bq &) = delete;
 };
 
-class atomic_uint
-{
-public:
-    unsigned load(memory_order mo) const volatile
-    {
-        (void)mo;
-        assert(mo == memory_order_relaxed
-            || mo == memory_order_consume
-            || mo == memory_order_acquire
-            || mo == memory_order_seq_cst);
-        unsigned v = val_;
-        _ReadWriteBarrier();
-        return v;
-    }
 
-    void store(unsigned v, memory_order mo) volatile
-    {
-        assert(mo == memory_order_relaxed
-            || mo == memory_order_release
-            || mo == memory_order_seq_cst);
+mpmc_bq <int> q(128);
 
-        if (mo == memory_order_seq_cst)
-        {
-            _InterlockedExchange((long volatile*)&val_, (long)v);
-        }
-        else
-        {
-            _ReadWriteBarrier();
-            val_ = v;
-        }
-    }
+int thread_num = 0;
+int element_num = 1000000;
 
-    bool compare_exchange_weak(unsigned& cmp, unsigned xchg, memory_order mo) volatile
-    {
-        unsigned prev = (unsigned)_InterlockedCompareExchange((long volatile*)&val_, (long)xchg, (long)cmp);
-        if (prev == cmp)
-            return true;
-        cmp = prev;
-        return false;
-    }
-
-private:
-    unsigned volatile           val_;
-};
-
-template<typename T>
-class atomic;
-
-template<>
-class atomic<unsigned> : public atomic_uint
-{
-};
-
-namespace std
-{
-    using ::memory_order;
-    using ::memory_order_relaxed;
-    using ::memory_order_consume;
-    using ::memory_order_acquire;
-    using ::memory_order_release;
-    using ::memory_order_acq_rel;
-    using ::memory_order_seq_cst;
-    using ::atomic_uint;
-    using ::atomic;
-};
-
-
-
-template<typename T>
-class mpmc_bounded_queue
-{
-public:
-    mpmc_bounded_queue(size_t buffer_size)
-        : buffer_(new cell_t [buffer_size])
-        , buffer_mask_(buffer_size - 1)
-    {
-        assert((buffer_size >= 2) && ((buffer_size & (buffer_size - 1)) == 0));
-        for (size_t i = 0; i != buffer_size; i += 1)
-            buffer_[i].sequence_.store(i, std::memory_order_relaxed);
-        enqueue_pos_.store(0, std::memory_order_relaxed);
-        dequeue_pos_.store(0, std::memory_order_relaxed);
-    }
-
-    ~mpmc_bounded_queue()
-    {
-        delete [] buffer_;
-    }
-
-    bool enqueue(T const& data)
-    {
-        cell_t* cell;
-        size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
-        for (;;)
-        {
-            cell = &buffer_[pos & buffer_mask_];
-            size_t seq = cell->sequence_.load(std::memory_order_acquire);
-            intptr_t dif = (intptr_t)seq - (intptr_t)pos;
-            if (dif == 0)
-            {
-                if (enqueue_pos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
-                    break;
-            }
-            else if (dif < 0)
-                return false;
-            else
-                pos = enqueue_pos_.load(std::memory_order_relaxed);
-        }
-
-        cell->data_ = data;
-        cell->sequence_.store(pos + 1, std::memory_order_release);
-
-        return true;
-    }
-
-    bool dequeue(T& data)
-    {
-        cell_t* cell;
-        size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
-        for (;;)
-        {
-            cell = &buffer_[pos & buffer_mask_];
-            size_t seq = cell->sequence_.load(std::memory_order_acquire);
-            intptr_t dif = (intptr_t)seq - (intptr_t)(pos + 1);
-            if (dif == 0)
-            {
-                if (dequeue_pos_.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
-                    break;
-            }
-            else if (dif < 0)
-                return false;
-            else
-                pos = dequeue_pos_.load(std::memory_order_relaxed);
-        }
-
-        data = cell->data_;
-        cell->sequence_.store(pos + buffer_mask_ + 1, std::memory_order_release);
-
-        return true;
-    }
-
-private:
-    struct cell_t
-    {
-        std::atomic<size_t>     sequence_;
-        T                       data_;
-    };
-
-    static size_t const         cacheline_size = 64;
-    typedef char                cacheline_pad_t [cacheline_size];
-
-    cacheline_pad_t             pad0_;
-    cell_t* const               buffer_;
-    size_t const                buffer_mask_;
-    cacheline_pad_t             pad1_;
-    std::atomic<size_t>         enqueue_pos_;
-    cacheline_pad_t             pad2_;
-    std::atomic<size_t>         dequeue_pos_;
-    cacheline_pad_t             pad3_;
-
-    mpmc_bounded_queue(mpmc_bounded_queue const&);
-    void operator = (mpmc_bounded_queue const&);
-};
-
-
-
-
-size_t const thread_count = 4;
-size_t const batch_size = 1;
-size_t const iter_count = 2000000;
-
-bool volatile g_start = 0;
-
-typedef mpmc_bounded_queue<int> queue_t;
-
-
-unsigned __stdcall thread_func(void* ctx)
-{
-    queue_t& queue = *(queue_t*)ctx;
-    int data;
-
-    srand((unsigned)time(0) + GetCurrentThreadId());
-    size_t pause = rand() % 1000;
-
-    while (g_start == 0)
-        SwitchToThread();
-
-    for (size_t i = 0; i != pause; i += 1)
-        _mm_pause();
-
-    for (int iter = 0; iter != iter_count; ++iter)
-    {
-        for (size_t i = 0; i != batch_size; i += 1)
-        {
-            while (!queue.enqueue(i))
-                SwitchToThread();
-        }
-        for (size_t i = 0; i != batch_size; i += 1)
-        {
-            while (!queue.dequeue(data))
-            SwitchToThread();
-        }
-    }
-
-    return 0;
+uint64_t NowMicros() {
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return static_cast<uint64_t>(tv.tv_sec) * 1000000 + tv.tv_usec;
 }
 
+void *func(void *arg) {
+  int id = *(int *)&arg;
+  for (int i = 0; i < element_num; i++) {
+    // printf("i %d\n", i);
+    while (!q.enqueue(i)) {
+      std::this_thread::yield();
+    }
+  }
+}
+
+void *func1(void *arg) {
+  int id = *(int *)&arg;
+  int data;
+  for (int i = 0; i < element_num; i++) {
+    while (!q.dequeue(data)) {
+      std::this_thread::yield();
+    }
+  }
+}
+
+void test_mcmq_mutilthreads() {
+  thread_num = 16;
+  pthread_t tid[thread_num];
+
+  pthread_t consumer[thread_num];
+  uint64_t st, ed;
+  st = NowMicros();
+  for (int i = 0; i < thread_num; i++) {
+    pthread_create(&consumer[i], NULL, func1, (void *)i);
+  }
+  for (int i = 0; i < thread_num; i++) {
+    pthread_create(&tid[i], NULL, func, (void *)i);
+  }
+  for (int i = 0; i < thread_num; i++) {
+    pthread_join(tid[i], NULL);
+  }
+  for (int i = 0; i < thread_num; i++) {
+    pthread_join(consumer[i], NULL);
+  }
+
+  ed = NowMicros();
+
+  printf("insert %lld elements, time cost %lld us\n", (uint64_t)thread_num * (uint64_t)element_num, ed - st);
+
+}
 
 
 int main()
 {
-    queue_t queue (1024);
-
-    HANDLE threads [thread_count];
-    for (int i = 0; i != thread_count; ++i)
-    {
-        threads[i] = (HANDLE)_beginthreadex(0, 0, thread_func, &queue, 0, 0);
-    }
-
-    Sleep(1);
-
-    unsigned __int64 start = __rdtsc();
-    g_start = 1;
-
-    WaitForMultipleObjects(thread_count, threads, 1, INFINITE);
-
-    unsigned __int64 end = __rdtsc();
-    unsigned __int64 time = end - start;
-    std::cout << "cycles/op=" << time / (batch_size * iter_count * 2 * thread_count) << std::endl;
+  test_mcmq_mutilthreads();
+  return 0;
 }
