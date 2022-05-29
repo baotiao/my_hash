@@ -73,8 +73,8 @@ class mpmc_bq {
       // 如果diff !=0 说明要插入的已经被别人插入了, 顺势去插入下个位置了
       // 如果diff < 0 说明队列已经满了
       intptr_t diff = (intptr_t)seq - (intptr_t)pos;
-      printf("diff %d seq %d pos %d \n", diff, seq, pos);
-      printf("m_enqueue_pos %d\n", m_enqueue_pos.load());
+      // printf("diff %d seq %d pos %d \n", diff, seq, pos);
+      // printf("m_enqueue_pos %d\n", m_enqueue_pos.load());
 
       /* If they are the same then it means this cell is empty */
 
@@ -107,7 +107,7 @@ class mpmc_bq {
 
     cell->m_pos.store(pos + 1, std::memory_order_release);
 
-    printf("m_enqueue_pos %d\n", m_enqueue_pos.load());
+    // printf("m_enqueue_pos %d\n", m_enqueue_pos.load());
     return (true);
   }
 
@@ -210,12 +210,10 @@ class mpmc_bq {
 };
 
 
-int queue_size = 100000;
-
-mpmc_bq <int> q(10000000);
+mpmc_bq <int> q(128);
 
 int thread_num = 0;
-int element_num = 100000;
+int element_num = 1000000;
 
 uint64_t NowMicros() {
   struct timeval tv;
@@ -226,14 +224,17 @@ uint64_t NowMicros() {
 void *func(void *arg) {
   int id = *(int *)&arg;
   for (int i = 0; i < element_num; i++) {
-    printf("i %d\n", i);
+    // printf("i %d\n", i);
     while (!q.enqueue(i)) {
       std::this_thread::yield();
     }
   }
+}
+
+void *func1(void *arg) {
+  int id = *(int *)&arg;
   int data;
   for (int i = 0; i < element_num; i++) {
-    printf("i %d\n", i);
     while (!q.dequeue(data)) {
       std::this_thread::yield();
     }
@@ -241,16 +242,23 @@ void *func(void *arg) {
 }
 
 void test_mcmq_mutilthreads() {
-  thread_num = 1;
+  thread_num = 32;
   pthread_t tid[thread_num];
 
+  pthread_t consumer[thread_num];
   uint64_t st, ed;
   st = NowMicros();
   for (int i = 0; i < thread_num; i++) {
     pthread_create(&tid[i], NULL, func, (void *)i);
   }
   for (int i = 0; i < thread_num; i++) {
+    pthread_create(&consumer[i], NULL, func1, (void *)i);
+  }
+  for (int i = 0; i < thread_num; i++) {
     pthread_join(tid[i], NULL);
+  }
+  for (int i = 0; i < thread_num; i++) {
+    pthread_join(consumer[i], NULL);
   }
 
   ed = NowMicros();
