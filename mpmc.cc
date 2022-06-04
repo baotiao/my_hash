@@ -15,6 +15,9 @@
 
 constexpr size_t INNODB_CACHE_LINE_SIZE = 64;
 
+// #define cpu_relax() asm volatile("pause\n": : :"memory")
+#define cpu_relax() 
+
 /** Multiple producer consumer, bounded queue
  Implementation of Dmitry Vyukov's MPMC algorithm
  http://www.1024cores.net/home/lock-free-algorithms/queues/bounded-mpmc-queue */
@@ -98,6 +101,8 @@ class mpmc_bq {
 
       } else {
         pos = m_enqueue_pos.load(std::memory_order_relaxed);
+        cpu_relax();
+
       }
     }
 
@@ -144,6 +149,7 @@ class mpmc_bq {
       } else {
         /* Under normal circumstances this branch should never be taken. */
         pos = m_dequeue_pos.load(std::memory_order_relaxed);
+        cpu_relax();
       }
     }
 

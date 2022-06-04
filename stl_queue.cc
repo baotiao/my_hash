@@ -53,7 +53,7 @@ void *func1(void *arg) {
 }
 
 void test_mcmq_mutilthreads() {
-  thread_num = 32;
+  thread_num = 16;
   pthread_t tid[thread_num];
 
   pthread_t consumer[thread_num];
@@ -72,6 +72,9 @@ void test_mcmq_mutilthreads() {
     pthread_join(consumer[i], NULL);
   }
 
+  while (!q.empty()) {
+    q.pop();
+  }
   ed = NowMicros();
 
   printf("insert %lld elements, time cost %lld us\n", (uint64_t)thread_num * (uint64_t)element_num, ed - st);
