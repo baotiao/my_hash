@@ -53,7 +53,7 @@ void *func1(void *arg) {
 }
 
 void test_mcmq_mutilthreads() {
-  thread_num = 16;
+  thread_num = 8;
   pthread_t tid[thread_num];
 
   pthread_t consumer[thread_num];

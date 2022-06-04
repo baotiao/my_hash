@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <sys/time.h>
 
+using namespace std;
+
 
 
 constexpr size_t INNODB_CACHE_LINE_SIZE = 64;
@@ -92,11 +94,16 @@ class mpmc_bq {
         if (m_enqueue_pos.compare_exchange_weak(pos, pos + 1,
                                                 std::memory_order_relaxed)) {
           break;
+        } else {
+          // cpu_relax();
+          // cpu_relax();
+          // cnt++;
         }
 
       } else if (diff < 0) {
         /* The queue is full */
 
+        cpu_relax();
         return (false);
 
       } else {
@@ -140,10 +147,14 @@ class mpmc_bq {
         if (m_dequeue_pos.compare_exchange_weak(pos, pos + 1,
                                                 std::memory_order_relaxed)) {
           break;
+        } else {
+          // cpu_relax();
+          // cpu_relax();
         }
 
       } else if (diff < 0) {
         /* The queue is empty */
+          cpu_relax();
         return (false);
 
       } else {
@@ -191,6 +202,7 @@ class mpmc_bq {
     return (false);
   }
 
+  std::atomic<int> cnt;
  private:
   using Pad = char[INNODB_CACHE_LINE_SIZE];
 
@@ -208,6 +220,7 @@ class mpmc_bq {
   Pad m_pad2;
   std::atomic<size_t> m_dequeue_pos;
   Pad m_pad3;
+
 
   mpmc_bq(mpmc_bq &&) = delete;
   mpmc_bq(const mpmc_bq &) = delete;
@@ -248,7 +261,7 @@ void *func1(void *arg) {
 }
 
 void test_mcmq_mutilthreads() {
-  thread_num = 16;
+  thread_num = 8;
   pthread_t tid[thread_num];
 
   pthread_t consumer[thread_num];
@@ -269,7 +282,9 @@ void test_mcmq_mutilthreads() {
 
   ed = NowMicros();
 
+  // printf("xx cnt %d\n", q.cnt.load());
   printf("insert %lld elements, time cost %lld us\n", (uint64_t)thread_num * (uint64_t)element_num, ed - st);
+
 
 }
 
