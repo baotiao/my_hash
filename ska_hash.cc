@@ -88,7 +88,5 @@ int main(int argc, char *argv[])
   printf("thread_num %ld element_num %ld\n", thread_num, element_num);
 
   test_hash();
-
-
   return 0;
 }

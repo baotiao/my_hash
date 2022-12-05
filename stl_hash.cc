@@ -9,6 +9,17 @@
 #include <random>
 #include <assert.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <string.h>
+
+#include <sys/stat.h>
+
+#include <cstdlib>
+#include <iostream>
 
 #include "flat_hash_map.hpp"
 
@@ -21,7 +32,7 @@ uint64_t NowMicros() {
 std::map<int, int> m_hash;
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
-const int kMaxThreadNum = 1024;
+const int kMaxThreadNum = 128;
 pthread_t tid[kMaxThreadNum];
 
 uint32_t thread_num = 1;
@@ -82,6 +93,7 @@ int main(int argc, char *argv[])
         return 0;
     }
   }
+  printf("thread_num %ld element_num %ld\n", thread_num, element_num);
 
   test_hash();
   return 0;
