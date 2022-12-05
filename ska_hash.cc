@@ -18,7 +18,7 @@ uint64_t NowMicros() {
   return static_cast<uint64_t>(tv.tv_sec) * 1000000 + tv.tv_usec;
 }
 
-std::map<int, int> m_hash;
+ska::flat_hash_map<int, int> m_hash;
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -59,5 +59,7 @@ void test_hash() {
 int main()
 {
   test_hash();
+
+
   return 0;
 }
