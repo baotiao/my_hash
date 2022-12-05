@@ -1,40 +1,48 @@
-
-
-测试 32 thread
-绑定32 thread 在同一个socket 下
-mpmc:
-
-这种绑定方法是在同一个socket 下 16个物理核32个逻辑核上, 也就是有2个thread 会共用1个物理核
-taskset -ac 0-15,32-47 ./a.out
-insert 16000000 elements, time cost 6536316 us
-
-对比如果放在两个socket 下, 32个物理核的32个逻辑核上
-
-taskset -ac 0-31 ./a.out
-insert 16000000 elements, time cost 8078345 us
-
-
-对比于stl_queue
-
-stl_queue
-
-taskset -ac 0-31 ./a.out
-insert 16000000 elements, time cost 5457384 us
-taskset -ac 0-15,32-47 ./a.out
-insert 16000000 elements, time cost 7163720 us
-
-std_queue 和mpmc 不一样, 跨socket 的性能反而是更好的
-
-
-测试 16 thread 的话 mpmc 会比stl_queue 好更多, 原因是32 thread 的时候两种绑定方法要么跨socket, 要么要共用物理核, 16thread 可以绑定在一个socket 下的16个物理核上
-
-mpmc:
-
-taskset -ac 0-15 ./a.out
-insert 8000000 elements, time cost 1760784 us
-
-stl_queue:
-taskset -ac 0-15 ./a.out
-insert 8000000 elements, time cost 3056000 us
-
-可以看到这里mpmc 是远远优于 stl_queue 的
+stl hash thread num 1
+thread_num 1 element_num 1000000
+insert 1000000 elements, time cost 179566 us
+lookup 1000000 elements, time cost 27405 us
+ska hash thread num 1
+thread_num 1 element_num 1000000
+insert 1000000 elements, time cost 577060 us
+lookup 1000000 elements, time cost 23628 us
+stl hash thread num 2
+thread_num 2 element_num 1000000
+insert 2000000 elements, time cost 680027 us
+lookup 2000000 elements, time cost 142207 us
+ska hash thread num 2
+thread_num 2 element_num 1000000
+insert 2000000 elements, time cost 1443080 us
+lookup 2000000 elements, time cost 259317 us
+stl hash thread num 4
+thread_num 4 element_num 1000000
+insert 4000000 elements, time cost 2065975 us
+lookup 4000000 elements, time cost 775410 us
+ska hash thread num 4
+thread_num 4 element_num 1000000
+insert 4000000 elements, time cost 3399215 us
+lookup 4000000 elements, time cost 890210 us
+stl hash thread num 8
+thread_num 8 element_num 1000000
+insert 8000000 elements, time cost 6574403 us
+lookup 8000000 elements, time cost 1209088 us
+ska hash thread num 8
+thread_num 8 element_num 1000000
+insert 8000000 elements, time cost 8866500 us
+lookup 8000000 elements, time cost 1717633 us
+stl hash thread num 16
+thread_num 16 element_num 1000000
+insert 16000000 elements, time cost 12242352 us
+lookup 16000000 elements, time cost 2384915 us
+ska hash thread num 16
+thread_num 16 element_num 1000000
+insert 16000000 elements, time cost 15959992 us
+lookup 16000000 elements, time cost 2814543 us
+stl hash thread num 32
+thread_num 32 element_num 1000000
+insert 32000000 elements, time cost 26125020 us
+lookup 32000000 elements, time cost 4238357 us
+ska hash thread num 32
+thread_num 32 element_num 1000000
+insert 32000000 elements, time cost 32047191 us
+lookup 32000000 elements, time cost 5758192 us

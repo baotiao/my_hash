@@ -1,5 +1,6 @@
 #include <iostream>
 #include <map>
+#include <unordered_map>
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -29,7 +30,7 @@ uint64_t NowMicros() {
   return static_cast<uint64_t>(tv.tv_sec) * 1000000 + tv.tv_usec;
 }
 
-std::map<int, int> m_hash;
+std::unordered_map<int, int> m_hash;
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 const int kMaxThreadNum = 128;
@@ -38,27 +39,26 @@ pthread_t tid[kMaxThreadNum];
 uint32_t thread_num = 1;
 uint32_t element_num = 10000000;
 
-
-void *func(void *arg) {
+void *func_insert(void *arg) {
   using namespace std;
 
   int id = *(int *)&arg;
+  id *= element_num;
   for (int i = 0; i < element_num; i++) {
-    // pthread_mutex_lock(&lock);
+    pthread_mutex_lock(&lock);
     m_hash[i + id] = i + id;
-    // pthread_mutex_unlock(&lock);
+    pthread_mutex_unlock(&lock);
   }
 }
 
-void test_hash() {
+void test_hash_insert() {
   m_hash.clear();
 
   uint64_t st, ed;
 
-  
   st = NowMicros();
   for (int i = 0; i < thread_num; i++) {
-    pthread_create(&tid[i], NULL, func, (void *)i);
+    pthread_create(&tid[i], NULL, func_insert, (void *)i);
   }
   for (int i = 0; i < thread_num; i++) {
     pthread_join(tid[i], NULL);
@@ -68,6 +68,34 @@ void test_hash() {
   printf("insert %lld elements, time cost %lld us\n", (uint64_t)thread_num * (uint64_t)element_num, ed - st);
 }
 
+void *func_lookup(void *arg) {
+  using namespace std;
+
+  int id = *(int *)&arg;
+  id *= element_num;
+  int tt = 0;
+  for (int i = 0; i < element_num; i++) {
+    pthread_mutex_lock(&lock);
+    tt += m_hash.find(i + id)->second;
+    pthread_mutex_unlock(&lock);
+  }
+}
+
+void test_hash_lookup() {
+
+  uint64_t st, ed;
+
+  st = NowMicros();
+  for (int i = 0; i < thread_num; i++) {
+    pthread_create(&tid[i], NULL, func_lookup, (void *)i);
+  }
+  for (int i = 0; i < thread_num; i++) {
+    pthread_join(tid[i], NULL);
+  }
+  ed = NowMicros();
+
+  printf("lookup %lld elements, time cost %lld us\n", (uint64_t)thread_num * (uint64_t)element_num, ed - st);
+}
 static void usage() {
   fprintf(stderr, "usage\n");
 }
@@ -94,7 +122,10 @@ int main(int argc, char *argv[])
     }
   }
   printf("thread_num %ld element_num %ld\n", thread_num, element_num);
+  test_hash_insert();
 
-  test_hash();
+  test_hash_lookup();
+
+  // test_hash_delete();
   return 0;
 }
